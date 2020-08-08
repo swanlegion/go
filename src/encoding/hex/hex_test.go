@@ -78,38 +78,37 @@ func TestDecodeString(t *testing.T) {
 	}
 }
 
-type errTest struct {
+var errTests = []struct {
 	in  string
+	out string
 	err error
+}{
+	{"", "", nil},
+	{"0", "", ErrLength},
+	{"zd4aa", "", InvalidByteError('z')},
+	{"d4aaz", "\xd4\xaa", InvalidByteError('z')},
+	{"30313", "01", ErrLength},
+	{"0g", "", InvalidByteError('g')},
+	{"00gg", "\x00", InvalidByteError('g')},
+	{"0\x01", "", InvalidByteError('\x01')},
+	{"ffeed", "\xff\xee", ErrLength},
 }
 
-var errTests = []errTest{
-	{"0", ErrLength},
-	{"zd4aa", ErrLength},
-	{"0g", InvalidByteError('g')},
-	{"00gg", InvalidByteError('g')},
-	{"0\x01", InvalidByteError('\x01')},
-}
-
-func TestInvalidErr(t *testing.T) {
-	for i, test := range errTests {
-		dst := make([]byte, DecodedLen(len(test.in)))
-		_, err := Decode(dst, []byte(test.in))
-		if err == nil {
-			t.Errorf("#%d: expected %v; got none", i, test.err)
-		} else if err != test.err {
-			t.Errorf("#%d: got: %v want: %v", i, err, test.err)
+func TestDecodeErr(t *testing.T) {
+	for _, tt := range errTests {
+		out := make([]byte, len(tt.in)+10)
+		n, err := Decode(out, []byte(tt.in))
+		if string(out[:n]) != tt.out || err != tt.err {
+			t.Errorf("Decode(%q) = %q, %v, want %q, %v", tt.in, string(out[:n]), err, tt.out, tt.err)
 		}
 	}
 }
 
-func TestInvalidStringErr(t *testing.T) {
-	for i, test := range errTests {
-		_, err := DecodeString(test.in)
-		if err == nil {
-			t.Errorf("#%d: expected %v; got none", i, test.err)
-		} else if err != test.err {
-			t.Errorf("#%d: got: %v want: %v", i, err, test.err)
+func TestDecodeStringErr(t *testing.T) {
+	for _, tt := range errTests {
+		out, err := DecodeString(tt.in)
+		if string(out) != tt.out || err != tt.err {
+			t.Errorf("DecodeString(%q) = %q, %v, want %q, %v", tt.in, out, err, tt.out, tt.err)
 		}
 	}
 }
@@ -148,25 +147,17 @@ func TestEncoderDecoder(t *testing.T) {
 	}
 }
 
-func TestDecodeErr(t *testing.T) {
-	tests := []struct {
-		in      string
-		wantOut string
-		wantErr error
-	}{
-		{"", "", nil},
-		{"0", "", io.ErrUnexpectedEOF},
-		{"0g", "", InvalidByteError('g')},
-		{"00gg", "\x00", InvalidByteError('g')},
-		{"0\x01", "", InvalidByteError('\x01')},
-		{"ffeed", "\xff\xee", io.ErrUnexpectedEOF},
-	}
-
-	for _, tt := range tests {
+func TestDecoderErr(t *testing.T) {
+	for _, tt := range errTests {
 		dec := NewDecoder(strings.NewReader(tt.in))
-		got, err := ioutil.ReadAll(dec)
-		if string(got) != tt.wantOut || err != tt.wantErr {
-			t.Errorf("NewDecoder(%q) = (%q, %v), want (%q, %v)", tt.in, got, err, tt.wantOut, tt.wantErr)
+		out, err := ioutil.ReadAll(dec)
+		wantErr := tt.err
+		// Decoder is reading from stream, so it reports io.ErrUnexpectedEOF instead of ErrLength.
+		if wantErr == ErrLength {
+			wantErr = io.ErrUnexpectedEOF
+		}
+		if string(out) != tt.out || err != wantErr {
+			t.Errorf("NewDecoder(%q) = %q, %v, want %q, %v", tt.in, out, err, tt.out, wantErr)
 		}
 	}
 }
@@ -197,6 +188,35 @@ func TestDumper(t *testing.T) {
 	}
 }
 
+func TestDumper_doubleclose(t *testing.T) {
+	var out bytes.Buffer
+	dumper := Dumper(&out)
+
+	dumper.Write([]byte(`gopher`))
+	dumper.Close()
+	dumper.Close()
+	dumper.Write([]byte(`gopher`))
+	dumper.Close()
+
+	expected := "00000000  67 6f 70 68 65 72                                 |gopher|\n"
+	if out.String() != expected {
+		t.Fatalf("got:\n%#v\nwant:\n%#v", out.String(), expected)
+	}
+}
+
+func TestDumper_earlyclose(t *testing.T) {
+	var out bytes.Buffer
+	dumper := Dumper(&out)
+
+	dumper.Close()
+	dumper.Write([]byte(`gopher`))
+
+	expected := ""
+	if out.String() != expected {
+		t.Fatalf("got:\n%#v\nwant:\n%#v", out.String(), expected)
+	}
+}
+
 func TestDump(t *testing.T) {
 	var in [40]byte
 	for i := range in {
@@ -222,8 +242,36 @@ func BenchmarkEncode(b *testing.B) {
 		sink = make([]byte, 2*size)
 
 		b.Run(fmt.Sprintf("%v", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
 			for i := 0; i < b.N; i++ {
 				Encode(sink, src)
+			}
+		})
+	}
+}
+
+func BenchmarkDecode(b *testing.B) {
+	for _, size := range []int{256, 1024, 4096, 16384} {
+		src := bytes.Repeat([]byte{'2', 'b', '7', '4', '4', 'f', 'a', 'a'}, size/8)
+		sink = make([]byte, size/2)
+
+		b.Run(fmt.Sprintf("%v", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			for i := 0; i < b.N; i++ {
+				Decode(sink, src)
+			}
+		})
+	}
+}
+
+func BenchmarkDump(b *testing.B) {
+	for _, size := range []int{256, 1024, 4096, 16384} {
+		src := bytes.Repeat([]byte{2, 3, 5, 7, 9, 11, 13, 17}, size/8)
+
+		b.Run(fmt.Sprintf("%v", size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			for i := 0; i < b.N; i++ {
+				Dump(src)
 			}
 		})
 	}

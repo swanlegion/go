@@ -10,8 +10,27 @@ package io
 import (
 	"errors"
 	"sync"
-	"sync/atomic"
 )
+
+// onceError is an object that will only store an error once.
+type onceError struct {
+	sync.Mutex // guards following
+	err        error
+}
+
+func (a *onceError) Store(err error) {
+	a.Lock()
+	defer a.Unlock()
+	if a.err != nil {
+		return
+	}
+	a.err = err
+}
+func (a *onceError) Load() error {
+	a.Lock()
+	defer a.Unlock()
+	return a.err
+}
 
 // ErrClosedPipe is the error used for read or write operations on a closed pipe.
 var ErrClosedPipe = errors.New("io: read/write on closed pipe")
@@ -24,8 +43,8 @@ type pipe struct {
 
 	once sync.Once // Protects closing done
 	done chan struct{}
-	rerr atomic.Value
-	werr atomic.Value
+	rerr onceError
+	werr onceError
 }
 
 func (p *pipe) Read(b []byte) (n int, err error) {
@@ -46,8 +65,8 @@ func (p *pipe) Read(b []byte) (n int, err error) {
 }
 
 func (p *pipe) readCloseError() error {
-	_, rok := p.rerr.Load().(error)
-	if werr, wok := p.werr.Load().(error); !rok && wok {
+	rerr := p.rerr.Load()
+	if werr := p.werr.Load(); rerr == nil && werr != nil {
 		return werr
 	}
 	return ErrClosedPipe
@@ -85,8 +104,8 @@ func (p *pipe) Write(b []byte) (n int, err error) {
 }
 
 func (p *pipe) writeCloseError() error {
-	_, wok := p.werr.Load().(error)
-	if rerr, rok := p.rerr.Load().(error); !wok && rok {
+	werr := p.werr.Load()
+	if rerr := p.rerr.Load(); werr == nil && rerr != nil {
 		return rerr
 	}
 	return ErrClosedPipe
@@ -123,6 +142,9 @@ func (r *PipeReader) Close() error {
 
 // CloseWithError closes the reader; subsequent writes
 // to the write half of the pipe will return the error err.
+//
+// CloseWithError never overwrites the previous error if it exists
+// and always returns nil.
 func (r *PipeReader) CloseWithError(err error) error {
 	return r.p.CloseRead(err)
 }
@@ -151,7 +173,8 @@ func (w *PipeWriter) Close() error {
 // read half of the pipe will return no bytes and the error err,
 // or EOF if err is nil.
 //
-// CloseWithError always returns nil.
+// CloseWithError never overwrites the previous error if it exists
+// and always returns nil.
 func (w *PipeWriter) CloseWithError(err error) error {
 	return w.p.CloseWrite(err)
 }

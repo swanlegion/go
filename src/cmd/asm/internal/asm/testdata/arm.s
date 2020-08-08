@@ -951,13 +951,17 @@ jmp_label_3:
 
 // MUL
 	MUL	R2, R3, R4           // 930204e0
-	MUL	R2, R4               // 920404e0
+	MUL	R2, R4               // 940204e0
+	MUL	R2, R4, R4           // 940204e0
 	MUL.S	R2, R3, R4           // 930214e0
-	MUL.S	R2, R4               // 920414e0
+	MUL.S	R2, R4               // 940214e0
+	MUL.S	R2, R4, R4           // 940214e0
 	MULU	R5, R6, R7           // 960507e0
-	MULU	R5, R7               // 950707e0
+	MULU	R5, R7               // 970507e0
+	MULU	R5, R7, R7           // 970507e0
 	MULU.S	R5, R6, R7           // 960517e0
-	MULU.S	R5, R7               // 950717e0
+	MULU.S	R5, R7               // 970517e0
+	MULU.S	R5, R7, R7           // 970517e0
 	MULLU	R1, R2, (R4, R3)     // 923184e0
 	MULLU.S	R1, R2, (R4, R3)     // 923194e0
 	MULL	R1, R2, (R4, R3)     // 9231c4e0
@@ -1029,11 +1033,14 @@ jmp_label_3:
 	SWI	$65535         // ffff00ef
 	SWI	               // 000000ef
 
-// BFX/BFXU
+// BFX/BFXU/BFC/BFI
 	BFX	$16, $8, R1, R2 // BFX $16, R1, $8, R2   // 5124afe7
 	BFX	$29, $2, R8                              // 5881bce7
 	BFXU	$16, $8, R1, R2 // BFXU $16, R1, $8, R2  // 5124efe7
 	BFXU	$29, $2, R8                              // 5881fce7
+	BFC	$29, $2, R8                              // 1f81dee7
+	BFI	$29, $2, R8                              // 1881dee7
+	BFI	$16, $8, R1, R2 // BFI $16, R1, $8, R2   // 1124d7e7
 
 // synthetic arithmatic
 	ADD	$0xffffffaa, R2, R3 // ADD $4294967210, R2, R3   // 55b0e0e30b3082e0
@@ -1575,6 +1582,8 @@ jmp_label_3:
 	MOVHU	R5@>8, R1                                         // 7514ffe6
 	MOVHU	R5@>16, R1                                        // 7518ffe6
 	MOVHU	R5@>24, R1                                        // 751cffe6
+
+	RET	foo(SB)
 
 //
 // END

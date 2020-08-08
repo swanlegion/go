@@ -219,11 +219,6 @@ func (t *Template) AddParseTree(name string, tree *parse.Tree) (*Template, error
 
 	t.nameSpace.mu.Lock()
 	defer t.nameSpace.mu.Unlock()
-	for _, tmpl := range t.set {
-		if tmpl.Tree == tree {
-			return nil, fmt.Errorf("html/template: cannot add parse tree that template %q already references", tmpl.Name())
-		}
-	}
 	text, err := t.text.AddParseTree(name, tree)
 	if err != nil {
 		return nil, err
@@ -300,6 +295,10 @@ func New(name string) *Template {
 // New allocates a new HTML template associated with the given one
 // and with the same delimiters. The association, which is transitive,
 // allows one template to invoke another with a {{template}} action.
+//
+// If a template with the given name already exists, the new HTML template
+// will replace it. The existing template will be reset and disassociated with
+// t.
 func (t *Template) New(name string) *Template {
 	t.nameSpace.mu.Lock()
 	defer t.nameSpace.mu.Unlock()
@@ -313,6 +312,10 @@ func (t *Template) new(name string) *Template {
 		t.text.New(name),
 		nil,
 		t.nameSpace,
+	}
+	if existing, ok := tmpl.set[name]; ok {
+		emptyTmpl := New(existing.Name())
+		*existing = *emptyTmpl
 	}
 	tmpl.set[name] = tmpl
 	return tmpl
@@ -437,9 +440,10 @@ func parseFiles(t *Template, filenames ...string) (*Template, error) {
 	return t, nil
 }
 
-// ParseGlob creates a new Template and parses the template definitions from the
-// files identified by the pattern, which must match at least one file. The
-// returned template will have the (base) name and (parsed) contents of the
+// ParseGlob creates a new Template and parses the template definitions from
+// the files identified by the pattern. The files are matched according to the
+// semantics of filepath.Match, and the pattern must match at least one file.
+// The returned template will have the (base) name and (parsed) contents of the
 // first file matched by the pattern. ParseGlob is equivalent to calling
 // ParseFiles with the list of files matched by the pattern.
 //
@@ -450,10 +454,10 @@ func ParseGlob(pattern string) (*Template, error) {
 }
 
 // ParseGlob parses the template definitions in the files identified by the
-// pattern and associates the resulting templates with t. The pattern is
-// processed by filepath.Glob and must match at least one file. ParseGlob is
-// equivalent to calling t.ParseFiles with the list of files matched by the
-// pattern.
+// pattern and associates the resulting templates with t. The files are matched
+// according to the semantics of filepath.Match, and the pattern must match at
+// least one file. ParseGlob is equivalent to calling t.ParseFiles with the
+// list of files matched by the pattern.
 //
 // When parsing multiple files with the same name in different directories,
 // the last one mentioned will be the one that results.

@@ -13,12 +13,14 @@ package testenv
 import (
 	"errors"
 	"flag"
+	"internal/cfg"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -33,11 +35,18 @@ func Builder() string {
 // HasGoBuild reports whether the current system can build programs with ``go build''
 // and then run them with os.StartProcess or exec.Command.
 func HasGoBuild() bool {
+	if os.Getenv("GO_GCFLAGS") != "" {
+		// It's too much work to require every caller of the go command
+		// to pass along "-gcflags="+os.Getenv("GO_GCFLAGS").
+		// For now, if $GO_GCFLAGS is set, report that we simply can't
+		// run go build.
+		return false
+	}
 	switch runtime.GOOS {
-	case "android", "nacl":
+	case "android", "js":
 		return false
 	case "darwin":
-		if strings.HasPrefix(runtime.GOARCH, "arm") {
+		if runtime.GOARCH == "arm64" {
 			return false
 		}
 	}
@@ -48,6 +57,9 @@ func HasGoBuild() bool {
 // and then run them with os.StartProcess or exec.Command.
 // If not, MustHaveGoBuild calls t.Skip with an explanation.
 func MustHaveGoBuild(t testing.TB) {
+	if os.Getenv("GO_GCFLAGS") != "" {
+		t.Skipf("skipping test: 'go build' not compatible with setting $GO_GCFLAGS")
+	}
 	if !HasGoBuild() {
 		t.Skipf("skipping test: 'go build' not available on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
@@ -77,6 +89,12 @@ func GoToolPath(t testing.TB) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Add all environment variables that affect the Go command to test metadata.
+	// Cached test results will be invalidate when these variables change.
+	// See golang.org/issue/32285.
+	for _, envVar := range strings.Fields(cfg.KnownEnv) {
+		os.Getenv(envVar)
+	}
 	return path
 }
 
@@ -104,10 +122,10 @@ func GoTool() (string, error) {
 // using os.StartProcess or (more commonly) exec.Command.
 func HasExec() bool {
 	switch runtime.GOOS {
-	case "nacl":
+	case "js":
 		return false
 	case "darwin":
-		if strings.HasPrefix(runtime.GOARCH, "arm") {
+		if runtime.GOARCH == "arm64" {
 			return false
 		}
 	}
@@ -117,10 +135,8 @@ func HasExec() bool {
 // HasSrc reports whether the entire source tree is available under GOROOT.
 func HasSrc() bool {
 	switch runtime.GOOS {
-	case "nacl":
-		return false
 	case "darwin":
-		if strings.HasPrefix(runtime.GOARCH, "arm") {
+		if runtime.GOARCH == "arm64" {
 			return false
 		}
 	}
@@ -136,16 +152,37 @@ func MustHaveExec(t testing.TB) {
 	}
 }
 
+var execPaths sync.Map // path -> error
+
+// MustHaveExecPath checks that the current system can start the named executable
+// using os.StartProcess or (more commonly) exec.Command.
+// If not, MustHaveExecPath calls t.Skip with an explanation.
+func MustHaveExecPath(t testing.TB, path string) {
+	MustHaveExec(t)
+
+	err, found := execPaths.Load(path)
+	if !found {
+		_, err = exec.LookPath(path)
+		err, _ = execPaths.LoadOrStore(path, err)
+	}
+	if err != nil {
+		t.Skipf("skipping test: %s: %s", path, err)
+	}
+}
+
 // HasExternalNetwork reports whether the current system can use
 // external (non-localhost) networks.
 func HasExternalNetwork() bool {
-	return !testing.Short()
+	return !testing.Short() && runtime.GOOS != "js"
 }
 
 // MustHaveExternalNetwork checks that the current system can use
 // external (non-localhost) networks.
 // If not, MustHaveExternalNetwork calls t.Skip with an explanation.
 func MustHaveExternalNetwork(t testing.TB) {
+	if runtime.GOOS == "js" {
+		t.Skipf("skipping test: no external network on %s", runtime.GOOS)
+	}
 	if testing.Short() {
 		t.Skipf("skipping test: no external network in -short mode")
 	}
@@ -199,12 +236,14 @@ func MustHaveLink(t testing.TB) {
 var flaky = flag.Bool("flaky", false, "run known-flaky tests too")
 
 func SkipFlaky(t testing.TB, issue int) {
+	t.Helper()
 	if !*flaky {
 		t.Skipf("skipping known flaky test without the -flaky flag; see golang.org/issue/%d", issue)
 	}
 }
 
 func SkipFlakyNet(t testing.TB) {
+	t.Helper()
 	if v, _ := strconv.ParseBool(os.Getenv("GO_BUILDER_FLAKY_NET")); v {
 		t.Skip("skipping test on builder known to have frequent network failures")
 	}

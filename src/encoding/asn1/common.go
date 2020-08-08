@@ -30,12 +30,14 @@ const (
 	TagUTF8String      = 12
 	TagSequence        = 16
 	TagSet             = 17
+	TagNumericString   = 18
 	TagPrintableString = 19
 	TagT61String       = 20
 	TagIA5String       = 22
 	TagUTCTime         = 23
 	TagGeneralizedTime = 24
 	TagGeneralString   = 27
+	TagBMPString       = 30
 )
 
 // ASN.1 class types represent the namespace of the tag.
@@ -74,6 +76,7 @@ type fieldParameters struct {
 	optional     bool   // true iff the field is OPTIONAL
 	explicit     bool   // true iff an EXPLICIT tag is in use.
 	application  bool   // true iff an APPLICATION tag is in use.
+	private      bool   // true iff a PRIVATE tag is in use.
 	defaultValue *int64 // a default value for INTEGER typed fields (maybe nil).
 	tag          *int   // the EXPLICIT or IMPLICIT tag (maybe nil).
 	stringType   int    // the string tag to use when marshaling.
@@ -106,6 +109,8 @@ func parseFieldParameters(str string) (ret fieldParameters) {
 			ret.stringType = TagIA5String
 		case part == "printable":
 			ret.stringType = TagPrintableString
+		case part == "numeric":
+			ret.stringType = TagNumericString
 		case part == "utf8":
 			ret.stringType = TagUTF8String
 		case strings.HasPrefix(part, "default:"):
@@ -124,6 +129,11 @@ func parseFieldParameters(str string) (ret fieldParameters) {
 			ret.set = true
 		case part == "application":
 			ret.application = true
+			if ret.tag == nil {
+				ret.tag = new(int)
+			}
+		case part == "private":
+			ret.private = true
 			if ret.tag == nil {
 				ret.tag = new(int)
 			}

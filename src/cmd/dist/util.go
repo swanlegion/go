@@ -326,7 +326,7 @@ func xreaddirfiles(dir string) []string {
 // xworkdir creates a new temporary directory to hold object files
 // and returns the name of that directory.
 func xworkdir() string {
-	name, err := ioutil.TempDir("", "go-tool-dist-")
+	name, err := ioutil.TempDir(os.Getenv("GOTMPDIR"), "go-tool-dist-")
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -383,23 +383,14 @@ func xsamefile(f1, f2 string) bool {
 }
 
 func xgetgoarm() string {
-	if goos == "nacl" {
-		// NaCl guarantees VFPv3 and is always cross-compiled.
-		return "7"
-	}
-	if goos == "darwin" {
-		// Assume all darwin/arm devices are have VFPv3. This
-		// port is also mostly cross-compiled, so it makes little
+	if goos == "android" {
+		// Assume all android devices have VFPv3.
+		// These ports are also mostly cross-compiled, so it makes little
 		// sense to auto-detect the setting.
 		return "7"
 	}
 	if gohostarch != "arm" || goos != gohostos {
 		// Conservative default for cross-compilation.
-		return "5"
-	}
-	if goos == "freebsd" || goos == "openbsd" {
-		// FreeBSD has broken VFP support.
-		// OpenBSD currently only supports softfloat.
 		return "5"
 	}
 

@@ -9,9 +9,12 @@ import (
 	"compress/lzw"
 	"image"
 	"image/color"
+	"image/color/palette"
 	"io"
 	"io/ioutil"
 	"reflect"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -315,23 +318,62 @@ func TestTransparentPixelOutsidePaletteRange(t *testing.T) {
 }
 
 func TestLoopCount(t *testing.T) {
-	data := []byte("GIF89a000\x00000,0\x00\x00\x00\n\x00" +
-		"\n\x00\x80000000\x02\b\xf01u\xb9\xfdal\x05\x00;")
-	img, err := DecodeAll(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal("DecodeAll:", err)
+	testCases := []struct {
+		name      string
+		data      []byte
+		loopCount int
+	}{
+		{
+			"loopcount-missing",
+			[]byte("GIF89a000\x00000" +
+				",0\x00\x00\x00\n\x00\n\x00\x80000000" + // image 0 descriptor & color table
+				"\x02\b\xf01u\xb9\xfdal\x05\x00;"), // image 0 image data & trailer
+			-1,
+		},
+		{
+			"loopcount-0",
+			[]byte("GIF89a000\x00000" +
+				"!\xff\vNETSCAPE2.0\x03\x01\x00\x00\x00" + // loop count = 0
+				",0\x00\x00\x00\n\x00\n\x00\x80000000" + // image 0 descriptor & color table
+				"\x02\b\xf01u\xb9\xfdal\x05\x00" + // image 0 image data
+				",0\x00\x00\x00\n\x00\n\x00\x80000000" + // image 1 descriptor & color table
+				"\x02\b\xf01u\xb9\xfdal\x05\x00;"), // image 1 image data & trailer
+			0,
+		},
+		{
+			"loopcount-1",
+			[]byte("GIF89a000\x00000" +
+				"!\xff\vNETSCAPE2.0\x03\x01\x01\x00\x00" + // loop count = 1
+				",0\x00\x00\x00\n\x00\n\x00\x80000000" + // image 0 descriptor & color table
+				"\x02\b\xf01u\xb9\xfdal\x05\x00" + // image 0 image data
+				",0\x00\x00\x00\n\x00\n\x00\x80000000" + // image 1 descriptor & color table
+				"\x02\b\xf01u\xb9\xfdal\x05\x00;"), // image 1 image data & trailer
+			1,
+		},
 	}
-	w := new(bytes.Buffer)
-	err = EncodeAll(w, img)
-	if err != nil {
-		t.Fatal("EncodeAll:", err)
-	}
-	img1, err := DecodeAll(w)
-	if err != nil {
-		t.Fatal("DecodeAll:", err)
-	}
-	if img.LoopCount != img1.LoopCount {
-		t.Errorf("loop count mismatch: %d vs %d", img.LoopCount, img1.LoopCount)
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			img, err := DecodeAll(bytes.NewReader(tc.data))
+			if err != nil {
+				t.Fatal("DecodeAll:", err)
+			}
+			w := new(bytes.Buffer)
+			err = EncodeAll(w, img)
+			if err != nil {
+				t.Fatal("EncodeAll:", err)
+			}
+			img1, err := DecodeAll(w)
+			if err != nil {
+				t.Fatal("DecodeAll:", err)
+			}
+			if img.LoopCount != tc.loopCount {
+				t.Errorf("loop count mismatch: %d vs %d", img.LoopCount, tc.loopCount)
+			}
+			if img.LoopCount != img1.LoopCount {
+				t.Errorf("loop count failed round-trip: %d vs %d", img.LoopCount, img1.LoopCount)
+			}
+		})
 	}
 }
 
@@ -348,6 +390,36 @@ func TestUnexpectedEOF(t *testing.T) {
 		if !strings.HasPrefix(text, "gif:") || !strings.HasSuffix(text, ": unexpected EOF") {
 			t.Errorf("Decode(testGIF[:%d]) = %v, want gif: ...: unexpected EOF", i, err)
 		}
+	}
+}
+
+// See golang.org/issue/22237
+func TestDecodeMemoryConsumption(t *testing.T) {
+	const frames = 3000
+	img := image.NewPaletted(image.Rectangle{Max: image.Point{1, 1}}, palette.WebSafe)
+	hugeGIF := &GIF{
+		Image:    make([]*image.Paletted, frames),
+		Delay:    make([]int, frames),
+		Disposal: make([]byte, frames),
+	}
+	for i := 0; i < frames; i++ {
+		hugeGIF.Image[i] = img
+		hugeGIF.Delay[i] = 60
+	}
+	buf := new(bytes.Buffer)
+	if err := EncodeAll(buf, hugeGIF); err != nil {
+		t.Fatal("EncodeAll:", err)
+	}
+	s0, s1 := new(runtime.MemStats), new(runtime.MemStats)
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(5))
+	runtime.ReadMemStats(s0)
+	if _, err := Decode(buf); err != nil {
+		t.Fatal("Decode:", err)
+	}
+	runtime.ReadMemStats(s1)
+	if heapDiff := int64(s1.HeapAlloc - s0.HeapAlloc); heapDiff > 30<<20 {
+		t.Fatalf("Decode of %d frames increased heap by %dMB", frames, heapDiff>>20)
 	}
 }
 

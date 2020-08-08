@@ -6,12 +6,10 @@ package work
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"go/build"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,17 +17,20 @@ import (
 	"cmd/go/internal/base"
 	"cmd/go/internal/cfg"
 	"cmd/go/internal/load"
+	"cmd/go/internal/search"
 )
 
 var CmdBuild = &base.Command{
-	UsageLine: "build [-o output] [-i] [build flags] [packages]",
+	UsageLine: "go build [-o output] [-i] [build flags] [packages]",
 	Short:     "compile packages and dependencies",
 	Long: `
 Build compiles the packages named by the import paths,
 along with their dependencies, but it does not install the results.
 
-If the arguments to build are a list of .go files, build treats
-them as a list of source files specifying a single package.
+If the arguments to build are a list of .go files from a single directory,
+build treats them as a list of source files specifying a single package.
+
+When compiling packages, build ignores files that end in '_test.go'.
 
 When compiling a single main package, build writes
 the resulting executable to an output file named after
@@ -41,12 +42,10 @@ When compiling multiple packages or a single non-main package,
 build compiles the packages but discards the resulting object,
 serving only as a check that the packages can be built.
 
-When compiling packages, build ignores files that end in '_test.go'.
-
-The -o flag, only allowed when compiling a single package,
-forces build to write the resulting executable or object
-to the named output file, instead of the default behavior described
-in the last two paragraphs.
+The -o flag forces build to write the resulting executable or object
+to the named output file or directory, instead of the default behavior described
+in the last two paragraphs. If the named output is a directory that exists,
+then any resulting executables will be written to that directory.
 
 The -i flag installs the packages that are dependencies of the target.
 
@@ -63,11 +62,13 @@ and test commands:
 		The default is the number of CPUs available.
 	-race
 		enable data race detection.
-		Supported only on linux/amd64, freebsd/amd64, darwin/amd64 and windows/amd64.
+		Supported only on linux/amd64, freebsd/amd64, darwin/amd64, windows/amd64,
+		linux/ppc64le and linux/arm64 (only for 48-bit VMA).
 	-msan
 		enable interoperation with memory sanitizer.
-		Supported only on linux/amd64,
+		Supported only on linux/amd64, linux/arm64
 		and only with Clang/LLVM as the host C compiler.
+		On linux/arm64, pie build mode will be used.
 	-v
 		print the names of packages as they are compiled.
 	-work
@@ -76,15 +77,15 @@ and test commands:
 	-x
 		print the commands.
 
-	-asmflags 'flag list'
+	-asmflags '[pattern=]arg list'
 		arguments to pass on each go tool asm invocation.
 	-buildmode mode
 		build mode to use. See 'go help buildmode' for more.
 	-compiler name
 		name of compiler to use, as in runtime.Compiler (gccgo or gc).
-	-gccgoflags 'arg list'
+	-gccgoflags '[pattern=]arg list'
 		arguments to pass on each gccgo compiler/linker invocation.
-	-gcflags 'arg list'
+	-gcflags '[pattern=]arg list'
 		arguments to pass on each go tool compile invocation.
 	-installsuffix suffix
 		a suffix to use in the name of the package installation directory,
@@ -93,27 +94,60 @@ and test commands:
 		or, if set explicitly, has _race appended to it. Likewise for the -msan
 		flag. Using a -buildmode option that requires non-default compile flags
 		has a similar effect.
-	-ldflags 'flag list'
+	-ldflags '[pattern=]arg list'
 		arguments to pass on each go tool link invocation.
 	-linkshared
-		link against shared libraries previously created with
-		-buildmode=shared.
+		build code that will be linked against shared libraries previously
+		created with -buildmode=shared.
+	-mod mode
+		module download mode to use: readonly, vendor, or mod.
+		See 'go help modules' for more.
+	-modcacherw
+		leave newly-created directories in the module cache read-write
+		instead of making them read-only.
+	-modfile file
+		in module aware mode, read (and possibly write) an alternate go.mod
+		file instead of the one in the module root directory. A file named
+		"go.mod" must still be present in order to determine the module root
+		directory, but it is not accessed. When -modfile is specified, an
+		alternate go.sum file is also used: its path is derived from the
+		-modfile flag by trimming the ".mod" extension and appending ".sum".
 	-pkgdir dir
 		install and load all packages from dir instead of the usual locations.
 		For example, when building with a non-standard configuration,
 		use -pkgdir to keep generated packages in a separate location.
-	-tags 'tag list'
-		a space-separated list of build tags to consider satisfied during the
+	-tags tag,list
+		a comma-separated list of build tags to consider satisfied during the
 		build. For more information about build tags, see the description of
 		build constraints in the documentation for the go/build package.
+		(Earlier versions of Go used a space-separated list, and that form
+		is deprecated but still recognized.)
+	-trimpath
+		remove all file system paths from the resulting executable.
+		Instead of absolute file system paths, the recorded file names
+		will begin with either "go" (for the standard library),
+		or a module path@version (when using modules),
+		or a plain import path (when using GOPATH).
 	-toolexec 'cmd args'
 		a program to use to invoke toolchain programs like vet and asm.
 		For example, instead of running asm, the go command will run
 		'cmd args /path/to/asm <arguments for asm>'.
 
-All the flags that take a list of arguments accept a space-separated
-list of strings. To embed spaces in an element in the list, surround
-it with either single or double quotes.
+The -asmflags, -gccgoflags, -gcflags, and -ldflags flags accept a
+space-separated list of arguments to pass to an underlying tool
+during the build. To embed spaces in an element in the list, surround
+it with either single or double quotes. The argument list may be
+preceded by a package pattern and an equal sign, which restricts
+the use of that argument list to the building of packages matching
+that pattern (see 'go help packages' for a description of package
+patterns). Without a pattern, the argument list applies only to the
+packages named on the command line. The flags may be repeated
+with different patterns in order to specify different arguments for
+different sets of packages. If a package matches patterns given in
+multiple flags, the latest match on the command line wins.
+For example, 'go build -gcflags=-S fmt' prints the disassembly
+only for package fmt, while 'go build -gcflags=all=-S fmt'
+prints the disassembly for fmt and all its dependencies.
 
 For more about specifying packages, see 'go help packages'.
 For more about where packages and binaries are installed,
@@ -139,18 +173,23 @@ func init() {
 	CmdInstall.Run = runInstall
 
 	CmdBuild.Flag.BoolVar(&cfg.BuildI, "i", false, "")
-	CmdBuild.Flag.StringVar(&cfg.BuildO, "o", "", "output file")
+	CmdBuild.Flag.StringVar(&cfg.BuildO, "o", "", "output file or directory")
 
-	AddBuildFlags(CmdBuild)
-	AddBuildFlags(CmdInstall)
+	CmdInstall.Flag.BoolVar(&cfg.BuildI, "i", false, "")
+
+	AddBuildFlags(CmdBuild, DefaultBuildFlags)
+	AddBuildFlags(CmdInstall, DefaultBuildFlags)
 }
 
 // Note that flags consulted by other parts of the code
 // (for example, buildV) are in cmd/go/internal/cfg.
 
-var buildAsmflags []string   // -asmflags flag
-var buildGcflags []string    // -gcflags flag
-var buildGccgoflags []string // -gccgoflags flag
+var (
+	forcedAsmflags   []string // internally-forced flags for cmd/asm
+	forcedGcflags    []string // internally-forced flags for cmd/compile
+	forcedLdflags    []string // internally-forced flags for cmd/link
+	forcedGccgoflags []string // internally-forced flags for gccgo
+)
 
 var BuildToolchain toolchain = noToolchain{}
 var ldBuildmode string
@@ -187,32 +226,80 @@ func init() {
 	}
 }
 
-// addBuildFlags adds the flags common to the build, clean, get,
+type BuildFlagMask int
+
+const (
+	DefaultBuildFlags BuildFlagMask = 0
+	OmitModFlag       BuildFlagMask = 1 << iota
+	OmitModCommonFlags
+	OmitVFlag
+)
+
+// AddBuildFlags adds the flags common to the build, clean, get,
 // install, list, run, and test commands.
-func AddBuildFlags(cmd *base.Command) {
+func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 	cmd.Flag.BoolVar(&cfg.BuildA, "a", false, "")
 	cmd.Flag.BoolVar(&cfg.BuildN, "n", false, "")
 	cmd.Flag.IntVar(&cfg.BuildP, "p", cfg.BuildP, "")
-	cmd.Flag.BoolVar(&cfg.BuildV, "v", false, "")
+	if mask&OmitVFlag == 0 {
+		cmd.Flag.BoolVar(&cfg.BuildV, "v", false, "")
+	}
 	cmd.Flag.BoolVar(&cfg.BuildX, "x", false, "")
 
-	cmd.Flag.Var((*base.StringsFlag)(&buildAsmflags), "asmflags", "")
+	cmd.Flag.Var(&load.BuildAsmflags, "asmflags", "")
 	cmd.Flag.Var(buildCompiler{}, "compiler", "")
 	cmd.Flag.StringVar(&cfg.BuildBuildmode, "buildmode", "default", "")
-	cmd.Flag.Var((*base.StringsFlag)(&buildGcflags), "gcflags", "")
-	cmd.Flag.Var((*base.StringsFlag)(&buildGccgoflags), "gccgoflags", "")
+	cmd.Flag.Var(&load.BuildGcflags, "gcflags", "")
+	cmd.Flag.Var(&load.BuildGccgoflags, "gccgoflags", "")
+	if mask&OmitModFlag == 0 {
+		cmd.Flag.StringVar(&cfg.BuildMod, "mod", "", "")
+	}
+	if mask&OmitModCommonFlags == 0 {
+		AddModCommonFlags(cmd)
+	}
 	cmd.Flag.StringVar(&cfg.BuildContext.InstallSuffix, "installsuffix", "", "")
-	cmd.Flag.Var((*base.StringsFlag)(&cfg.BuildLdflags), "ldflags", "")
+	cmd.Flag.Var(&load.BuildLdflags, "ldflags", "")
 	cmd.Flag.BoolVar(&cfg.BuildLinkshared, "linkshared", false, "")
 	cmd.Flag.StringVar(&cfg.BuildPkgdir, "pkgdir", "", "")
 	cmd.Flag.BoolVar(&cfg.BuildRace, "race", false, "")
 	cmd.Flag.BoolVar(&cfg.BuildMSan, "msan", false, "")
-	cmd.Flag.Var((*base.StringsFlag)(&cfg.BuildContext.BuildTags), "tags", "")
+	cmd.Flag.Var((*tagsFlag)(&cfg.BuildContext.BuildTags), "tags", "")
 	cmd.Flag.Var((*base.StringsFlag)(&cfg.BuildToolexec), "toolexec", "")
+	cmd.Flag.BoolVar(&cfg.BuildTrimpath, "trimpath", false, "")
 	cmd.Flag.BoolVar(&cfg.BuildWork, "work", false, "")
 
 	// Undocumented, unstable debugging flags.
 	cmd.Flag.StringVar(&cfg.DebugActiongraph, "debug-actiongraph", "", "")
+}
+
+// AddModCommonFlags adds the module-related flags common to build commands
+// and 'go mod' subcommands.
+func AddModCommonFlags(cmd *base.Command) {
+	cmd.Flag.BoolVar(&cfg.ModCacheRW, "modcacherw", false, "")
+	cmd.Flag.StringVar(&cfg.ModFile, "modfile", "", "")
+}
+
+// tagsFlag is the implementation of the -tags flag.
+type tagsFlag []string
+
+func (v *tagsFlag) Set(s string) error {
+	// For compatibility with Go 1.12 and earlier, allow "-tags='a b c'" or even just "-tags='a'".
+	if strings.Contains(s, " ") || strings.Contains(s, "'") {
+		return (*base.StringsFlag)(v).Set(s)
+	}
+
+	// Split on commas, ignore empty strings.
+	*v = []string{}
+	for _, s := range strings.Split(s, ",") {
+		if s != "" {
+			*v = append(*v, s)
+		}
+	}
+	return nil
+}
+
+func (v *tagsFlag) String() string {
+	return "<TagsFlag>"
 }
 
 // fileExtSplit expects a filename and returns the name
@@ -254,182 +341,33 @@ func oneMainPkg(pkgs []*load.Package) []*load.Package {
 
 var pkgsFilter = func(pkgs []*load.Package) []*load.Package { return pkgs }
 
-func BuildModeInit() {
-	gccgo := cfg.BuildToolchainName == "gccgo"
-	var codegenArg string
-	platform := cfg.Goos + "/" + cfg.Goarch
-	switch cfg.BuildBuildmode {
-	case "archive":
-		pkgsFilter = pkgsNotMain
-	case "c-archive":
-		pkgsFilter = oneMainPkg
-		switch platform {
-		case "darwin/arm", "darwin/arm64":
-			codegenArg = "-shared"
-		default:
-			switch cfg.Goos {
-			case "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "solaris":
-				// Use -shared so that the result is
-				// suitable for inclusion in a PIE or
-				// shared library.
-				codegenArg = "-shared"
-			}
-		}
-		cfg.ExeSuffix = ".a"
-		ldBuildmode = "c-archive"
-	case "c-shared":
-		pkgsFilter = oneMainPkg
-		if gccgo {
-			codegenArg = "-fPIC"
-		} else {
-			switch platform {
-			case "linux/amd64", "linux/arm", "linux/arm64", "linux/386", "linux/ppc64le",
-				"android/amd64", "android/arm", "android/arm64", "android/386":
-				codegenArg = "-shared"
-			case "darwin/amd64", "darwin/386":
-			case "windows/amd64", "windows/386":
-				// Do not add usual .exe suffix to the .dll file.
-				cfg.ExeSuffix = ""
-			default:
-				base.Fatalf("-buildmode=c-shared not supported on %s\n", platform)
-			}
-		}
-		ldBuildmode = "c-shared"
-	case "default":
-		switch platform {
-		case "android/arm", "android/arm64", "android/amd64", "android/386":
-			codegenArg = "-shared"
-			ldBuildmode = "pie"
-		case "darwin/arm", "darwin/arm64":
-			codegenArg = "-shared"
-			fallthrough
-		default:
-			ldBuildmode = "exe"
-		}
-	case "exe":
-		pkgsFilter = pkgsMain
-		ldBuildmode = "exe"
-	case "pie":
-		if cfg.BuildRace {
-			base.Fatalf("-buildmode=pie not supported when -race is enabled")
-		}
-		if gccgo {
-			base.Fatalf("-buildmode=pie not supported by gccgo")
-		} else {
-			switch platform {
-			case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/s390x",
-				"android/amd64", "android/arm", "android/arm64", "android/386":
-				codegenArg = "-shared"
-			case "darwin/amd64":
-				codegenArg = "-shared"
-			default:
-				base.Fatalf("-buildmode=pie not supported on %s\n", platform)
-			}
-		}
-		ldBuildmode = "pie"
-	case "shared":
-		pkgsFilter = pkgsNotMain
-		if gccgo {
-			codegenArg = "-fPIC"
-		} else {
-			switch platform {
-			case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/s390x":
-			default:
-				base.Fatalf("-buildmode=shared not supported on %s\n", platform)
-			}
-			codegenArg = "-dynlink"
-		}
-		if cfg.BuildO != "" {
-			base.Fatalf("-buildmode=shared and -o not supported together")
-		}
-		ldBuildmode = "shared"
-	case "plugin":
-		pkgsFilter = oneMainPkg
-		if gccgo {
-			codegenArg = "-fPIC"
-		} else {
-			switch platform {
-			case "linux/amd64", "linux/arm", "linux/arm64", "linux/386", "linux/s390x", "linux/ppc64le",
-				"android/amd64", "android/arm", "android/arm64", "android/386":
-			case "darwin/amd64":
-				// Skip DWARF generation due to #21647
-				cfg.BuildLdflags = append(cfg.BuildLdflags, "-w")
-			default:
-				base.Fatalf("-buildmode=plugin not supported on %s\n", platform)
-			}
-			codegenArg = "-dynlink"
-		}
-		cfg.ExeSuffix = ".so"
-		ldBuildmode = "plugin"
-	default:
-		base.Fatalf("buildmode=%s not supported", cfg.BuildBuildmode)
-	}
-	if cfg.BuildLinkshared {
-		if gccgo {
-			codegenArg = "-fPIC"
-		} else {
-			switch platform {
-			case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/s390x":
-				buildAsmflags = append(buildAsmflags, "-D=GOBUILDMODE_shared=1")
-			default:
-				base.Fatalf("-linkshared not supported on %s\n", platform)
-			}
-			codegenArg = "-dynlink"
-			// TODO(mwhudson): remove -w when that gets fixed in linker.
-			cfg.BuildLdflags = append(cfg.BuildLdflags, "-linkshared", "-w")
-		}
-	}
-	if codegenArg != "" {
-		if gccgo {
-			buildGccgoflags = append([]string{codegenArg}, buildGccgoflags...)
-		} else {
-			buildAsmflags = append([]string{codegenArg}, buildAsmflags...)
-			buildGcflags = append([]string{codegenArg}, buildGcflags...)
-		}
-		// Don't alter InstallSuffix when modifying default codegen args.
-		if cfg.BuildBuildmode != "default" || cfg.BuildLinkshared {
-			if cfg.BuildContext.InstallSuffix != "" {
-				cfg.BuildContext.InstallSuffix += "_"
-			}
-			cfg.BuildContext.InstallSuffix += codegenArg[1:]
-		}
-	}
-	if strings.HasPrefix(runtimeVersion, "go1") && !strings.Contains(os.Args[0], "go_bootstrap") {
-		buildGcflags = append(buildGcflags, "-goversion", runtimeVersion)
-	}
-}
-
 var runtimeVersion = runtime.Version()
 
 func runBuild(cmd *base.Command, args []string) {
-	InstrumentInit()
-	BuildModeInit()
+	BuildInit()
 	var b Builder
 	b.Init()
 
 	pkgs := load.PackagesForBuild(args)
 
-	if len(pkgs) == 1 && pkgs[0].Name == "main" && cfg.BuildO == "" {
-		_, cfg.BuildO = path.Split(pkgs[0].ImportPath)
-		cfg.BuildO += cfg.ExeSuffix
-	}
+	explicitO := len(cfg.BuildO) > 0
 
-	// Special case -o /dev/null by not writing at all.
-	if cfg.BuildO == os.DevNull {
-		cfg.BuildO = ""
+	if len(pkgs) == 1 && pkgs[0].Name == "main" && cfg.BuildO == "" {
+		cfg.BuildO = pkgs[0].DefaultExecName()
+		cfg.BuildO += cfg.ExeSuffix
 	}
 
 	// sanity check some often mis-used options
 	switch cfg.BuildContext.Compiler {
 	case "gccgo":
-		if len(buildGcflags) != 0 {
+		if load.BuildGcflags.Present() {
 			fmt.Println("go build: when using gccgo toolchain, please pass compiler flags using -gccgoflags, not -gcflags")
 		}
-		if len(cfg.BuildLdflags) != 0 {
+		if load.BuildLdflags.Present() {
 			fmt.Println("go build: when using gccgo toolchain, please pass linker flags using -gccgoflags, not -ldflags")
 		}
 	case "gc":
-		if len(buildGccgoflags) != 0 {
+		if load.BuildGccgoflags.Present() {
 			fmt.Println("go build: when using gc toolchain, please pass compile flags using -gcflags, and linker flags using -ldflags")
 		}
 	}
@@ -439,9 +377,41 @@ func runBuild(cmd *base.Command, args []string) {
 		depMode = ModeInstall
 	}
 
+	pkgs = omitTestOnly(pkgsFilter(load.Packages(args)))
+
+	// Special case -o /dev/null by not writing at all.
+	if cfg.BuildO == os.DevNull {
+		cfg.BuildO = ""
+	}
+
 	if cfg.BuildO != "" {
+		// If the -o name exists and is a directory, then
+		// write all main packages to that directory.
+		// Otherwise require only a single package be built.
+		if fi, err := os.Stat(cfg.BuildO); err == nil && fi.IsDir() {
+			if !explicitO {
+				base.Fatalf("go build: build output %q already exists and is a directory", cfg.BuildO)
+			}
+			a := &Action{Mode: "go build"}
+			for _, p := range pkgs {
+				if p.Name != "main" {
+					continue
+				}
+
+				p.Target = filepath.Join(cfg.BuildO, p.DefaultExecName())
+				p.Target += cfg.ExeSuffix
+				p.Stale = true
+				p.StaleReason = "build -o flag in use"
+				a.Deps = append(a.Deps, b.AutoAction(ModeInstall, depMode, p))
+			}
+			if len(a.Deps) == 0 {
+				base.Fatalf("go build: no main packages to build")
+			}
+			b.Do(a)
+			return
+		}
 		if len(pkgs) > 1 {
-			base.Fatalf("go build: cannot use -o with multiple packages")
+			base.Fatalf("go build: cannot write multiple packages to non-directory %s", cfg.BuildO)
 		} else if len(pkgs) == 0 {
 			base.Fatalf("no packages to build")
 		}
@@ -454,8 +424,6 @@ func runBuild(cmd *base.Command, args []string) {
 		return
 	}
 
-	pkgs = pkgsFilter(load.Packages(args))
-
 	a := &Action{Mode: "go build"}
 	for _, p := range pkgs {
 		a.Deps = append(a.Deps, b.AutoAction(ModeBuild, depMode, p))
@@ -467,11 +435,21 @@ func runBuild(cmd *base.Command, args []string) {
 }
 
 var CmdInstall = &base.Command{
-	UsageLine: "install [build flags] [packages]",
+	UsageLine: "go install [-i] [build flags] [packages]",
 	Short:     "compile and install packages and dependencies",
 	Long: `
-Install compiles and installs the packages named by the import paths,
-along with their dependencies.
+Install compiles and installs the packages named by the import paths.
+
+Executables are installed in the directory named by the GOBIN environment
+variable, which defaults to $GOPATH/bin or $HOME/go/bin if the GOPATH
+environment variable is not set. Executables in $GOROOT
+are installed in $GOROOT/bin or $GOTOOLDIR instead of $GOBIN.
+
+When module-aware mode is disabled, other packages are installed in the
+directory $GOPATH/pkg/$GOOS_$GOARCH. When module-aware mode is enabled,
+other packages are built and cached but not installed.
+
+The -i flag installs the dependencies of the named packages as well.
 
 For more about the build flags, see 'go help build'.
 For more about specifying packages, see 'go help packages'.
@@ -505,7 +483,7 @@ func libname(args []string, pkgs []*load.Package) (string, error) {
 	}
 	var haveNonMeta bool
 	for _, arg := range args {
-		if load.IsMetaPackage(arg) {
+		if search.IsMetaPackage(arg) {
 			appendName(arg)
 		} else {
 			haveNonMeta = true
@@ -522,10 +500,10 @@ func libname(args []string, pkgs []*load.Package) (string, error) {
 					arg = bp.ImportPath
 				}
 			}
-			appendName(strings.Replace(arg, "/", "-", -1))
+			appendName(strings.ReplaceAll(arg, "/", "-"))
 		} else {
 			for _, pkg := range pkgs {
-				appendName(strings.Replace(pkg.ImportPath, "/", "-", -1))
+				appendName(strings.ReplaceAll(pkg.ImportPath, "/", "-"))
 			}
 		}
 	} else if haveNonMeta { // have both meta package and a non-meta one
@@ -537,30 +515,54 @@ func libname(args []string, pkgs []*load.Package) (string, error) {
 }
 
 func runInstall(cmd *base.Command, args []string) {
-	InstrumentInit()
-	BuildModeInit()
-	InstallPackages(args, false)
+	BuildInit()
+	InstallPackages(args, load.PackagesForBuild(args))
 }
 
-func InstallPackages(args []string, forGet bool) {
+// omitTestOnly returns pkgs with test-only packages removed.
+func omitTestOnly(pkgs []*load.Package) []*load.Package {
+	var list []*load.Package
+	for _, p := range pkgs {
+		if len(p.GoFiles)+len(p.CgoFiles) == 0 && !p.Internal.CmdlinePkgLiteral {
+			// Package has no source files,
+			// perhaps due to build tags or perhaps due to only having *_test.go files.
+			// Also, it is only being processed as the result of a wildcard match
+			// like ./..., not because it was listed as a literal path on the command line.
+			// Ignore it.
+			continue
+		}
+		list = append(list, p)
+	}
+	return list
+}
+
+func InstallPackages(patterns []string, pkgs []*load.Package) {
 	if cfg.GOBIN != "" && !filepath.IsAbs(cfg.GOBIN) {
 		base.Fatalf("cannot install, GOBIN must be an absolute path")
 	}
 
-	pkgs := pkgsFilter(load.PackagesForBuild(args))
-
+	pkgs = omitTestOnly(pkgsFilter(pkgs))
 	for _, p := range pkgs {
-		if p.Target == "" && (!p.Standard || p.ImportPath != "unsafe") {
+		if p.Target == "" {
 			switch {
+			case p.Standard && p.ImportPath == "unsafe":
+				// unsafe is a built-in package, has no target
+			case p.Name != "main" && p.Internal.Local && p.ConflictDir == "":
+				// Non-executables outside GOPATH need not have a target:
+				// we can use the cache to hold the built package archive for use in future builds.
+				// The ones inside GOPATH should have a target (in GOPATH/pkg)
+				// or else something is wrong and worth reporting (like a ConflictDir).
+			case p.Name != "main" && p.Module != nil:
+				// Non-executables have no target (except the cache) when building with modules.
 			case p.Internal.GobinSubdir:
-				base.Errorf("go install: cannot install cross-compiled binaries when GOBIN is set")
-			case p.Internal.Cmdline:
-				base.Errorf("go install: no install location for .go files listed on command line (GOBIN not set)")
+				base.Errorf("go %s: cannot install cross-compiled binaries when GOBIN is set", cfg.CmdName)
+			case p.Internal.CmdlineFiles:
+				base.Errorf("go %s: no install location for .go files listed on command line (GOBIN not set)", cfg.CmdName)
 			case p.ConflictDir != "":
-				base.Errorf("go install: no install location for %s: hidden by %s", p.Dir, p.ConflictDir)
+				base.Errorf("go %s: no install location for %s: hidden by %s", cfg.CmdName, p.Dir, p.ConflictDir)
 			default:
-				base.Errorf("go install: no install location for directory %s outside GOPATH\n"+
-					"\tFor more details see: 'go help gopath'", p.Dir)
+				base.Errorf("go %s: no install location for directory %s outside GOPATH\n"+
+					"\tFor more details see: 'go help gopath'", cfg.CmdName, p.Dir)
 			}
 		}
 	}
@@ -568,18 +570,17 @@ func InstallPackages(args []string, forGet bool) {
 
 	var b Builder
 	b.Init()
+	depMode := ModeBuild
+	if cfg.BuildI {
+		depMode = ModeInstall
+	}
 	a := &Action{Mode: "go install"}
 	var tools []*Action
 	for _, p := range pkgs {
-		// During 'go get', don't attempt (and fail) to install packages with only tests.
-		// TODO(rsc): It's not clear why 'go get' should be different from 'go install' here. See #20760.
-		if forGet && len(p.GoFiles)+len(p.CgoFiles) == 0 && len(p.TestGoFiles)+len(p.XTestGoFiles) > 0 {
-			continue
-		}
 		// If p is a tool, delay the installation until the end of the build.
 		// This avoids installing assemblers/compilers that are being executed
 		// by other steps in the build.
-		a1 := b.AutoAction(ModeInstall, ModeInstall, p)
+		a1 := b.AutoAction(ModeInstall, depMode, p)
 		if load.InstallTargetDir(p) == load.ToTool {
 			a.Deps = append(a.Deps, a1.Deps...)
 			a1.Deps = append(a1.Deps, a)
@@ -601,7 +602,7 @@ func InstallPackages(args []string, forGet bool) {
 		// tools above did not apply, and a is just a simple Action
 		// with a list of Deps, one per package named in pkgs,
 		// the same as in runBuild.
-		a = b.buildmodeShared(ModeInstall, ModeInstall, args, pkgs, a)
+		a = b.buildmodeShared(ModeInstall, ModeInstall, patterns, pkgs, a)
 	}
 
 	b.Do(a)
@@ -616,10 +617,10 @@ func InstallPackages(args []string, forGet bool) {
 	// One way to view this behavior is that it is as if 'go install' first
 	// runs 'go build' and the moves the generated file to the install dir.
 	// See issue 9645.
-	if len(args) == 0 && len(pkgs) == 1 && pkgs[0].Name == "main" {
+	if len(patterns) == 0 && len(pkgs) == 1 && pkgs[0].Name == "main" {
 		// Compute file 'go build' would have created.
 		// If it exists and is an executable file, remove it.
-		_, targ := filepath.Split(pkgs[0].ImportPath)
+		targ := pkgs[0].DefaultExecName()
 		targ += cfg.ExeSuffix
 		if filepath.Join(pkgs[0].Dir, targ) != pkgs[0].Target { // maybe $GOBIN is the current directory
 			fi, err := os.Stat(targ)
@@ -632,50 +633,6 @@ func InstallPackages(args []string, forGet bool) {
 				}
 			}
 		}
-	}
-}
-
-func InstrumentInit() {
-	if !cfg.BuildRace && !cfg.BuildMSan {
-		return
-	}
-	if cfg.BuildRace && cfg.BuildMSan {
-		fmt.Fprintf(os.Stderr, "go %s: may not use -race and -msan simultaneously\n", flag.Args()[0])
-		os.Exit(2)
-	}
-	if cfg.BuildMSan && (cfg.Goos != "linux" || cfg.Goarch != "amd64") {
-		fmt.Fprintf(os.Stderr, "-msan is not supported on %s/%s\n", cfg.Goos, cfg.Goarch)
-		os.Exit(2)
-	}
-	if cfg.Goarch != "amd64" || cfg.Goos != "linux" && cfg.Goos != "freebsd" && cfg.Goos != "darwin" && cfg.Goos != "windows" {
-		fmt.Fprintf(os.Stderr, "go %s: -race and -msan are only supported on linux/amd64, freebsd/amd64, darwin/amd64 and windows/amd64\n", flag.Args()[0])
-		os.Exit(2)
-	}
-	if !cfg.BuildContext.CgoEnabled {
-		instrFlag := "-race"
-		if cfg.BuildMSan {
-			instrFlag = "-msan"
-		}
-		fmt.Fprintf(os.Stderr, "go %s: %s requires cgo; enable cgo by setting CGO_ENABLED=1\n", flag.Args()[0], instrFlag)
-		os.Exit(2)
-	}
-	if cfg.BuildRace {
-		buildGcflags = append(buildGcflags, "-race")
-		cfg.BuildLdflags = append(cfg.BuildLdflags, "-race")
-	} else {
-		buildGcflags = append(buildGcflags, "-msan")
-		cfg.BuildLdflags = append(cfg.BuildLdflags, "-msan")
-	}
-	if cfg.BuildContext.InstallSuffix != "" {
-		cfg.BuildContext.InstallSuffix += "_"
-	}
-
-	if cfg.BuildRace {
-		cfg.BuildContext.InstallSuffix += "race"
-		cfg.BuildContext.BuildTags = append(cfg.BuildContext.BuildTags, "race")
-	} else {
-		cfg.BuildContext.InstallSuffix += "msan"
-		cfg.BuildContext.BuildTags = append(cfg.BuildContext.BuildTags, "msan")
 	}
 }
 

@@ -343,10 +343,11 @@ func SendMail(addr string, a Auth, from string, to []string, msg []byte) error {
 		}
 	}
 	if a != nil && c.ext != nil {
-		if _, ok := c.ext["AUTH"]; ok {
-			if err = c.Auth(a); err != nil {
-				return err
-			}
+		if _, ok := c.ext["AUTH"]; !ok {
+			return errors.New("smtp: server doesn't support AUTH")
+		}
+		if err = c.Auth(a); err != nil {
+			return err
 		}
 	}
 	if err = c.Mail(from); err != nil {
@@ -395,6 +396,16 @@ func (c *Client) Reset() error {
 		return err
 	}
 	_, _, err := c.cmd(250, "RSET")
+	return err
+}
+
+// Noop sends the NOOP command to the server. It does nothing but check
+// that the connection to the server is okay.
+func (c *Client) Noop() error {
+	if err := c.hello(); err != nil {
+		return err
+	}
+	_, _, err := c.cmd(250, "NOOP")
 	return err
 }
 

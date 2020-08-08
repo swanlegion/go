@@ -8,7 +8,14 @@ package elliptic
 
 import (
 	"crypto/subtle"
+	"internal/cpu"
 	"math/big"
+	"unsafe"
+)
+
+const (
+	offsetS390xHasVX  = unsafe.Offsetof(cpu.S390X.HasVX)
+	offsetS390xHasVE1 = unsafe.Offsetof(cpu.S390X.HasVXE)
 )
 
 type p256CurveFast struct {
@@ -26,14 +33,26 @@ var (
 	p256PreFast *[37][64]p256Point
 )
 
-// hasVectorFacility reports whether the machine has the z/Architecture
-// vector facility installed and enabled.
-func hasVectorFacility() bool
+//go:noescape
+func p256MulInternalTrampolineSetup()
 
-var hasVX = hasVectorFacility()
+//go:noescape
+func p256SqrInternalTrampolineSetup()
+
+//go:noescape
+func p256MulInternalVX()
+
+//go:noescape
+func p256MulInternalVMSL()
+
+//go:noescape
+func p256SqrInternalVX()
+
+//go:noescape
+func p256SqrInternalVMSL()
 
 func initP256Arch() {
-	if hasVX {
+	if cpu.S390X.HasVX {
 		p256 = p256CurveFast{p256Params}
 		initTable()
 		return
@@ -50,27 +69,44 @@ func (curve p256CurveFast) Params() *CurveParams {
 
 // Functions implemented in p256_asm_s390x.s
 // Montgomery multiplication modulo P256
+//
+//go:noescape
+func p256SqrAsm(res, in1 []byte)
+
+//go:noescape
 func p256MulAsm(res, in1, in2 []byte)
 
 // Montgomery square modulo P256
 func p256Sqr(res, in []byte) {
-	p256MulAsm(res, in, in)
+	p256SqrAsm(res, in)
 }
 
 // Montgomery multiplication by 1
+//
+//go:noescape
 func p256FromMont(res, in []byte)
 
 // iff cond == 1  val <- -val
+//
+//go:noescape
 func p256NegCond(val *p256Point, cond int)
 
 // if cond == 0 res <- b; else res <- a
+//
+//go:noescape
 func p256MovCond(res, a, b *p256Point, cond int)
 
 // Constant time table access
+//
+//go:noescape
 func p256Select(point *p256Point, table []p256Point, idx int)
+
+//go:noescape
 func p256SelectBase(point *p256Point, table []p256Point, idx int)
 
 // Montgomery multiplication modulo Ord(G)
+//
+//go:noescape
 func p256OrdMul(res, in1, in2 []byte)
 
 // Montgomery square modulo Ord(G), repeated n times
@@ -85,10 +121,16 @@ func p256OrdSqr(res, in []byte, n int) {
 // If sign == 1 -> P2 = -P2
 // If sel == 0 -> P3 = P1
 // if zero == 0 -> P3 = P2
+//
+//go:noescape
 func p256PointAddAffineAsm(P3, P1, P2 *p256Point, sign, sel, zero int)
 
 // Point add
+//
+//go:noescape
 func p256PointAddAsm(P3, P1, P2 *p256Point) int
+
+//go:noescape
 func p256PointDoubleAsm(P3, P1 *p256Point)
 
 func (curve p256CurveFast) Inverse(k *big.Int) *big.Int {

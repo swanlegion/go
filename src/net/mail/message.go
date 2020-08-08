@@ -13,13 +13,12 @@ Notable divergences:
 	* The full range of spacing (the CFWS syntax element) is not supported,
 	  such as breaking addresses across lines.
 	* No unicode normalization is performed.
-	* Address with some RFC 5322 3.2.3 specials without quotes are parsed.
+	* The special characters ()[]:;@\, are allowed to appear unquoted in names.
 */
 package mail
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +26,7 @@ import (
 	"mime"
 	"net/textproto"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -66,9 +66,12 @@ func ReadMessage(r io.Reader) (msg *Message, err error) {
 
 // Layouts suitable for passing to time.Parse.
 // These are tried in order.
-var dateLayouts []string
+var (
+	dateLayoutsBuildOnce sync.Once
+	dateLayouts          []string
+)
 
-func init() {
+func buildDateLayouts() {
 	// Generate layouts based on RFC 5322, section 3.3.
 
 	dows := [...]string{"", "Mon, "}   // day-of-week
@@ -76,7 +79,7 @@ func init() {
 	years := [...]string{"2006", "06"} // year = 4*DIGIT / 2*DIGIT
 	seconds := [...]string{":05", ""}  // second
 	// "-0700 (MST)" is not in RFC 5322, but is common.
-	zones := [...]string{"-0700", "MST", "-0700 (MST)"} // zone = (("+" / "-") 4DIGIT) / "GMT" / ...
+	zones := [...]string{"-0700", "MST"} // zone = (("+" / "-") 4DIGIT) / "GMT" / ...
 
 	for _, dow := range dows {
 		for _, day := range days {
@@ -94,6 +97,30 @@ func init() {
 
 // ParseDate parses an RFC 5322 date string.
 func ParseDate(date string) (time.Time, error) {
+	dateLayoutsBuildOnce.Do(buildDateLayouts)
+	// CR and LF must match and are tolerated anywhere in the date field.
+	date = strings.ReplaceAll(date, "\r\n", "")
+	if strings.Index(date, "\r") != -1 {
+		return time.Time{}, errors.New("mail: header has a CR without LF")
+	}
+	// Re-using some addrParser methods which support obsolete text, i.e. non-printable ASCII
+	p := addrParser{date, nil}
+	p.skipSpace()
+
+	// RFC 5322: zone = (FWS ( "+" / "-" ) 4DIGIT) / obs-zone
+	// zone length is always 5 chars unless obsolete (obs-zone)
+	if ind := strings.IndexAny(p.s, "+-"); ind != -1 && len(p.s) >= ind+5 {
+		date = p.s[:ind+5]
+		p.s = p.s[ind+5:]
+	} else if ind := strings.Index(p.s, "T"); ind != -1 && len(p.s) >= ind+1 {
+		// The last letter T of the obsolete time zone is checked when no standard time zone is found.
+		// If T is misplaced, the date to parse is garbage.
+		date = p.s[:ind+1]
+		p.s = p.s[ind+1:]
+	}
+	if !p.skipCFWS() {
+		return time.Time{}, errors.New("mail: misformatted parenthetical comment")
+	}
 	for _, layout := range dateLayouts {
 		t, err := time.Parse(layout, date)
 		if err == nil {
@@ -144,7 +171,7 @@ type Address struct {
 	Address string // user@domain
 }
 
-// Parses a single RFC 5322 address, e.g. "Barry Gibbs <bg@example.com>"
+// ParseAddress parses a single RFC 5322 address, e.g. "Barry Gibbs <bg@example.com>"
 func ParseAddress(address string) (*Address, error) {
 	return (&addrParser{s: address}).parseSingleAddress()
 }
@@ -247,13 +274,22 @@ func (p *addrParser) parseAddressList() ([]*Address, error) {
 	var list []*Address
 	for {
 		p.skipSpace()
+
+		// allow skipping empty entries (RFC5322 obs-addr-list)
+		if p.consume(',') {
+			continue
+		}
+		if p.empty() {
+			break
+		}
+
 		addrs, err := p.parseAddress(true)
 		if err != nil {
 			return nil, err
 		}
 		list = append(list, addrs...)
 
-		if !p.skipCfws() {
+		if !p.skipCFWS() {
 			return nil, errors.New("mail: misformatted parenthetical comment")
 		}
 		if p.empty() {
@@ -271,7 +307,7 @@ func (p *addrParser) parseSingleAddress() (*Address, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !p.skipCfws() {
+	if !p.skipCFWS() {
 		return nil, errors.New("mail: misformatted parenthetical comment")
 	}
 	if !p.empty() {
@@ -303,7 +339,17 @@ func (p *addrParser) parseAddress(handleGroup bool) ([]*Address, error) {
 	// TODO(dsymonds): Is this really correct?
 	spec, err := p.consumeAddrSpec()
 	if err == nil {
+		var displayName string
+		p.skipSpace()
+		if !p.empty() && p.peek() == '(' {
+			displayName, err = p.consumeDisplayNameComment()
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		return []*Address{{
+			Name:    displayName,
 			Address: spec,
 		}}, err
 	}
@@ -328,6 +374,21 @@ func (p *addrParser) parseAddress(handleGroup bool) ([]*Address, error) {
 	}
 	// angle-addr = "<" addr-spec ">"
 	if !p.consume('<') {
+		atext := true
+		for _, r := range displayName {
+			if !isAtext(r, true, false) {
+				atext = false
+				break
+			}
+		}
+		if atext {
+			// The input is like "foo.bar"; it's possible the input
+			// meant to be "foo.bar@domain", or "foo.bar <...>".
+			return nil, errors.New("mail: missing '@' or angle-addr")
+		}
+		// The input is like "Full Name", which couldn't possibly be a
+		// valid email address if followed by "@domain"; the input
+		// likely meant to be "Full Name <...>".
 		return nil, errors.New("mail: no angle-addr")
 	}
 	spec, err = p.consumeAddrSpec()
@@ -350,7 +411,7 @@ func (p *addrParser) consumeGroupList() ([]*Address, error) {
 	// handle empty group.
 	p.skipSpace()
 	if p.consume(';') {
-		p.skipCfws()
+		p.skipCFWS()
 		return group, nil
 	}
 
@@ -363,11 +424,11 @@ func (p *addrParser) consumeGroupList() ([]*Address, error) {
 		}
 		group = append(group, addrs...)
 
-		if !p.skipCfws() {
+		if !p.skipCFWS() {
 			return nil, errors.New("mail: misformatted parenthetical comment")
 		}
 		if p.consume(';') {
-			p.skipCfws()
+			p.skipCFWS()
 			break
 		}
 		if !p.consume(',') {
@@ -570,6 +631,30 @@ Loop:
 	return atom, nil
 }
 
+func (p *addrParser) consumeDisplayNameComment() (string, error) {
+	if !p.consume('(') {
+		return "", errors.New("mail: comment does not start with (")
+	}
+	comment, ok := p.consumeComment()
+	if !ok {
+		return "", errors.New("mail: misformatted parenthetical comment")
+	}
+
+	// TODO(stapelberg): parse quoted-string within comment
+	words := strings.FieldsFunc(comment, func(r rune) bool { return r == ' ' || r == '\t' })
+	for idx, word := range words {
+		decoded, isEncoded, err := p.decodeRFC2047Word(word)
+		if err != nil {
+			return "", err
+		}
+		if isEncoded {
+			words[idx] = decoded
+		}
+	}
+
+	return strings.Join(words, " "), nil
+}
+
 func (p *addrParser) consume(c byte) bool {
 	if p.empty() || p.peek() != c {
 		return false
@@ -595,8 +680,8 @@ func (p *addrParser) len() int {
 	return len(p.s)
 }
 
-// skipCfws skips CFWS as defined in RFC5322.
-func (p *addrParser) skipCfws() bool {
+// skipCFWS skips CFWS as defined in RFC5322.
+func (p *addrParser) skipCFWS() bool {
 	p.skipSpace()
 
 	for {
@@ -604,7 +689,7 @@ func (p *addrParser) skipCfws() bool {
 			break
 		}
 
-		if !p.skipComment() {
+		if _, ok := p.consumeComment(); !ok {
 			return false
 		}
 
@@ -614,10 +699,11 @@ func (p *addrParser) skipCfws() bool {
 	return true
 }
 
-func (p *addrParser) skipComment() bool {
+func (p *addrParser) consumeComment() (string, bool) {
 	// '(' already consumed.
 	depth := 1
 
+	var comment string
 	for {
 		if p.empty() || depth == 0 {
 			break
@@ -630,10 +716,13 @@ func (p *addrParser) skipComment() bool {
 		} else if p.peek() == ')' {
 			depth--
 		}
+		if depth > 0 {
+			comment += p.s[:1]
+		}
 		p.s = p.s[1:]
 	}
 
-	return depth == 0
+	return comment, depth == 0
 }
 
 func (p *addrParser) decodeRFC2047Word(s string) (word string, isEncoded bool, err error) {
@@ -697,7 +786,7 @@ func isQtext(r rune) bool {
 
 // quoteString renders a string as an RFC 5322 quoted-string.
 func quoteString(s string) string {
-	var buf bytes.Buffer
+	var buf strings.Builder
 	buf.WriteByte('"')
 	for _, r := range s {
 		if isQtext(r) || isWSP(r) {

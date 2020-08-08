@@ -59,6 +59,12 @@ func ExampleTrailingZeros64() {
 	// TrailingZeros64(0000000000000000000000000000000000000000000000000000000000001110) = 1
 }
 
+func ExampleOnesCount() {
+	fmt.Printf("OnesCount(%b) = %d\n", 14, bits.OnesCount(14))
+	// Output:
+	// OnesCount(1110) = 3
+}
+
 func ExampleOnesCount8() {
 	fmt.Printf("OnesCount8(%08b) = %d\n", 14, bits.OnesCount8(14))
 	// Output:
@@ -86,33 +92,41 @@ func ExampleOnesCount64() {
 func ExampleRotateLeft8() {
 	fmt.Printf("%08b\n", 15)
 	fmt.Printf("%08b\n", bits.RotateLeft8(15, 2))
+	fmt.Printf("%08b\n", bits.RotateLeft8(15, -2))
 	// Output:
 	// 00001111
 	// 00111100
+	// 11000011
 }
 
 func ExampleRotateLeft16() {
 	fmt.Printf("%016b\n", 15)
 	fmt.Printf("%016b\n", bits.RotateLeft16(15, 2))
+	fmt.Printf("%016b\n", bits.RotateLeft16(15, -2))
 	// Output:
 	// 0000000000001111
 	// 0000000000111100
+	// 1100000000000011
 }
 
 func ExampleRotateLeft32() {
 	fmt.Printf("%032b\n", 15)
 	fmt.Printf("%032b\n", bits.RotateLeft32(15, 2))
+	fmt.Printf("%032b\n", bits.RotateLeft32(15, -2))
 	// Output:
 	// 00000000000000000000000000001111
 	// 00000000000000000000000000111100
+	// 11000000000000000000000000000011
 }
 
 func ExampleRotateLeft64() {
 	fmt.Printf("%064b\n", 15)
 	fmt.Printf("%064b\n", bits.RotateLeft64(15, 2))
+	fmt.Printf("%064b\n", bits.RotateLeft64(15, -2))
 	// Output:
 	// 0000000000000000000000000000000000000000000000000000000000001111
 	// 0000000000000000000000000000000000000000000000000000000000111100
+	// 1100000000000000000000000000000000000000000000000000000000000011
 }
 
 func ExampleReverse8() {
